@@ -1,3 +1,14 @@
 __pycache__/
 .pytest_cache/
 *.log
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Examples directory - ignore all subdirectories but keep specific files
+examples/**/
+!examples/*.png
+!examples/*.ipynb
+!examples/*.py

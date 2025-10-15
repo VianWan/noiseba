@@ -5,6 +5,8 @@ from .plot_phase_velocity_curves import plot_phase_velocity_curves
 from .plot_sensitivity import plot_sensitivity
 from .plot_velocity_profile import plot_velocity_profile
 from .plot_ccf import plot_ccf
+from .window_selection import snr_optimal_select, energy_symmetry_select, energy_window
+
 
 __all__ = [
     'stream_data',

@@ -1,23 +1,21 @@
 from __future__ import annotations
 
-import numpy as np
-
-from numpy.fft import fft, ifft
-from obspy import read
-from obspy.core import Trace, AttribDict
-from scipy.signal import correlation_lags, correlate, hilbert
-from scipy.signal import convolve
-from scipy.signal.windows import hann
-from typing import Tuple, List
-from collections import defaultdict
-from joblib import Parallel, delayed
-from tqdm import tqdm
 from pathlib import Path
+from typing import List, Tuple
+
+import numpy as np
+from joblib import Parallel, delayed
+from numpy.fft import fft, ifft
+from obspy.core import AttribDict, Trace
+from scipy.signal import convolve, correlate, correlation_lags, hilbert
+from scipy.signal.windows import hann
+from tqdm import tqdm
+
 
 def read_coord(file_path):
     """Load station coordinate"""
     stations = {}
-    with open(file_path, 'r') as fin:
+    with open(file_path, "r") as fin:
         for line in fin.readlines():
             tmp = line.strip().split()
             if len(tmp) >= 3:
@@ -26,8 +24,9 @@ def read_coord(file_path):
                 stations[tmp[1]] = [float(tmp[0]), 0]
     return stations
 
+
 def process_trace(data, operator, p=0.05):
-    data = np.atleast_2d(data)   # at least 2d
+    data = np.atleast_2d(data)  # at least 2d
     n_traces, n_samples = data.shape
     sn = int(n_samples * p)
     hn = 2 * sn
@@ -42,34 +41,36 @@ def process_trace(data, operator, p=0.05):
     abs_fd = np.abs(fd)
 
     # spectral whitening
-    smoothed = np.array([
-        convolve(abs_fd[i], operator, mode='same')
-        for i in range(n_traces)
-    ])
+    smoothed = np.array(
+        [convolve(abs_fd[i], operator, mode="same") for i in range(n_traces)]
+    )
 
     fd /= smoothed
     fd[np.isnan(fd)] = 0
 
     return ifft(fd).real
 
+
 def stream_data(stream) -> Tuple[np.ndarray, List[str]]:
     """Convert stream to np.ndarray and trim data according to the  dataset's minimal and maximum time."""
-    stream.detrend('demean')
-    stream.detrend('linear')
+    stream.detrend("demean")
+    stream.detrend("linear")
     # stream.taper(max_percentage=0.05, type='cosine')
     begin_time = np.max([i.stats.starttime for i in stream])
     end_time = np.min([i.stats.endtime for i in stream])
     stream.trim(begin_time, end_time)
     data = np.array([tr.data for tr in stream])
-    station = ['45' + tr.stats.station for tr in stream]    
+    station = ["45" + tr.stats.station for tr in stream]
 
     return data, station
+
 
 def sliding_window_indices(data_len, win_len, step):
     """return sliding window indices"""
     starts = list(range(0, data_len - win_len + 1, step))
     ends = [s + win_len for s in starts]
     return list(zip(starts, ends))
+
 
 def get_ccf(
     stream,
@@ -110,11 +111,11 @@ def get_ccf(
     ccf_distance : defaultdict
         {station_pair: list of (distance, x1, y1, x2, y2)}.
     """
-    dt = round(stream[0].stats.delta, 3)
+    dt = round(stream[0].stats.delta, 4)
     data, stations = stream_data(stream)
     n_sta, n_pts = data.shape
     window_idx = sliding_window_indices(n_pts, win_len, step)
-    lag_times = correlation_lags(win_len, win_len, mode='full') * dt
+    lag_times = correlation_lags(win_len, win_len, mode="full") * dt
     idx_begin = int(np.where(np.isclose(lag_times, cor_time_begin))[0])
     idx_end = int(np.where(np.isclose(lag_times, cor_time_end))[0]) + 1
     used_lag_times = lag_times[idx_begin:idx_end]
@@ -122,9 +123,8 @@ def get_ccf(
     # allocate memory
     ccf_tem = np.zeros((len(window_idx), len(used_lag_times)))
 
-    ccf_dict = defaultdict(list)
-    ccf_dist = defaultdict(list)
-
+    ccf_dict = dict()
+    ccf_dist = dict()
     # compute ccf
     for i in range(n_sta - 1):
         sta1 = stations[i]
@@ -142,12 +142,13 @@ def get_ccf(
                 ccf_tem[win_row, :] = ccf_full[idx_begin:idx_end]
 
             pair = f"{sta1}_{sta2}"
-            ccf_dict[pair].append(ccf_tem.copy())
-            ccf_dist[pair].append((distance, x1, y1, x2, y2))
+
+            ccf_dict[pair] = ccf_tem.copy()
+            ccf_dist[pair] = (distance, x1, y1, x2, y2)
 
     return ccf_dict, ccf_dist
 
-       
+
 def stack_ccf(
     ccf_data: np.ndarray,
     method: str = "linear",
@@ -191,18 +192,30 @@ def stack_ccf(
         analytic = hilbert(arr, axis=1)
         phases = np.angle(analytic)
         coherence = np.abs(np.exp(1j * phases).mean(axis=0))
-        weights = coherence ** nu
+        weights = coherence**nu
         return ccf_linear * weights
 
     raise ValueError("Unknown method. Use 'linear' or 'pws'.")
-# Save CCF 
-def write_ccf(ccf_dict, ccf_distance, output_dir, freq_min, freq_max, dt, start_time, method='pws', nu=2.0):
+
+
+# Save CCF
+def write_ccf(
+    ccf_dict,
+    ccf_distance,
+    output_dir,
+    freq_min,
+    freq_max,
+    dt,
+    start_time,
+    method="pws",
+    nu=2.0,
+):
     if not output_dir.exists():
         output_dir.mkdir(parents=True, exist_ok=True)
 
     for ccf_name, ccf_data in ccf_dict.items():
-        dist, c1_x, c1_y, c2_x, c2_y = ccf_distance[ccf_name][0]
-        cor_data = stack_ccf(ccf_data[0], method=method, nu=nu)
+        dist, c1_x, c1_y, c2_x, c2_y = ccf_distance[ccf_name]
+        cor_data = stack_ccf(ccf_data, method=method, nu=nu)
         tr = Trace(data=cor_data)
         tr.stats.delta = dt
         tr.stats.sac = AttribDict()
@@ -212,12 +225,25 @@ def write_ccf(ccf_dict, ccf_distance, output_dir, freq_min, freq_max, dt, start_
         tr.stats.sac.evla = c1_y
         tr.stats.sac.stlo = c2_x
         tr.stats.sac.stla = c2_y
-        tr.filter('bandpass', freqmin=freq_min, freqmax=freq_max)
-        tr.write(output_dir.joinpath(f'COR_{ccf_name}.sac').as_posix(), format='SAC')
-# parallel save CCF 
-def _write_ccf(ccf_name, ccf_data, ccf_distance, output_dir, freq_min, freq_max, dt, start_time, method='pws', nu=2.0):
-    dist, c1_x, c1_y, c2_x, c2_y = ccf_distance[ccf_name][0]
-    cor_data = stack_ccf(ccf_data[0], method=method, nu=nu)
+        tr.filter("bandpass", freqmin=freq_min, freqmax=freq_max)
+        tr.write(output_dir.joinpath(f"COR_{ccf_name}.sac").as_posix(), format="SAC")
+
+
+# parallel save CCF
+def _write_ccf(
+    ccf_name,
+    ccf_data,
+    ccf_distance,
+    output_dir,
+    freq_min,
+    freq_max,
+    dt,
+    start_time,
+    method="pws",
+    nu=2.0,
+):
+    dist, c1_x, c1_y, c2_x, c2_y = ccf_distance[ccf_name]
+    cor_data = stack_ccf(ccf_data, method=method, nu=nu)
     tr = Trace(data=cor_data)
     tr.stats.delta = dt
     tr.stats.sac = AttribDict()
@@ -227,31 +253,56 @@ def _write_ccf(ccf_name, ccf_data, ccf_distance, output_dir, freq_min, freq_max,
     tr.stats.sac.evla = c1_y
     tr.stats.sac.stlo = c2_x
     tr.stats.sac.stla = c2_y
-    tr.filter('bandpass', freqmin=freq_min, freqmax=freq_max, corners=4, zerophase=True)
-    tr.write(output_dir.joinpath(f'COR_{ccf_name}.sac').as_posix(), format='SAC')
+    tr.filter("bandpass", freqmin=freq_min, freqmax=freq_max)
+    tr.write(output_dir.joinpath(f"COR_{ccf_name}.sac").as_posix(), format="SAC")
 
-def write_ccf_parallel(ccf_dict, ccf_distance, output_dir, freq_min, freq_max, dt, start_time, method='pws', nu=2.0, n_jobs=4):
+
+def write_ccf_parallel(
+    ccf_dict,
+    ccf_distance,
+    output_dir,
+    freq_min,
+    freq_max,
+    dt,
+    start_time,
+    method="pws",
+    nu=2.0,
+    n_jobs=4,
+):
     output_dir = Path(output_dir)
     if not output_dir.exists():
         output_dir.mkdir(parents=True, exist_ok=True)
-    
-    Parallel(n_jobs=n_jobs, backend="threading")(
-            delayed(_write_ccf)(
-                ccf_name,
-                ccf_data,
-                ccf_distance,
-                output_dir,
-                freq_min,
-                freq_max,
-                dt,
-                start_time,
-                method,
-                nu,
-            )
-            for ccf_name, ccf_data in tqdm(ccf_dict.items(), desc="Writing CCFs...")
-        )
 
-def compute_ccf_pair(idx, idy, data, station, coord, window_idx, operator, taper, cor_time_begin_idx, cor_time_end_idx, used_lag_time):
+    Parallel(n_jobs=n_jobs, backend="threading")(
+        delayed(_write_ccf)(
+            ccf_name,
+            ccf_data,
+            ccf_distance,
+            output_dir,
+            freq_min,
+            freq_max,
+            dt,
+            start_time,
+            method,
+            nu,
+        )
+        for ccf_name, ccf_data in tqdm(ccf_dict.items(), desc="Writing CCFs...")
+    )
+
+
+def compute_ccf_pair(
+    idx,
+    idy,
+    data,
+    station,
+    coord,
+    window_idx,
+    operator,
+    taper,
+    cor_time_begin_idx,
+    cor_time_end_idx,
+    used_lag_time,
+):
     c1_station = station[idx]
     c2_station = station[idy]
     c1_x, c1_y = coord[c1_station]
@@ -266,96 +317,62 @@ def compute_ccf_pair(idx, idy, data, station, coord, window_idx, operator, taper
         c1_data = process_trace(c1_data, operator, taper).flatten()
         c2_data = process_trace(c2_data, operator, taper).flatten()
 
-        ccf_tem[tem_row, :] = correlate(c1_data, c2_data, mode='full', method='fft')[cor_time_begin_idx:cor_time_end_idx]
+        ccf_tem[tem_row, :] = correlate(c1_data, c2_data, mode="full", method="fft")[
+            cor_time_begin_idx:cor_time_end_idx
+        ]
 
     key = f"{c1_station}_{c2_station}"
     return key, ccf_tem.copy(), (distance, c1_x, c1_y, c2_x, c2_y)
 
-def get_ccf_parallel(stream, operator, taper, win_len, step, coord, cor_time_begin, cor_time_end, n_jobs=4):
+
+def get_ccf_parallel(
+    stream,
+    operator,
+    taper,
+    win_len,
+    step,
+    coord,
+    cor_time_begin,
+    cor_time_end,
+    n_jobs=4,
+):
     dt = np.around(stream[0].stats.delta, decimals=3)
     data, station = stream_data(stream)
     row, col = data.shape
 
     window_idx = sliding_window_indices(col, win_len, step)
-    lag_time = correlation_lags(win_len, win_len, mode='full') * dt
+    lag_time = correlation_lags(win_len, win_len, mode="full") * dt
     cor_time_begin_idx = np.where(lag_time == cor_time_begin)[0][0]
     cor_time_end_idx = np.where(lag_time == cor_time_end)[0][0] + 1
     used_lag_time = lag_time[cor_time_begin_idx:cor_time_end_idx]
 
-    tasks = [
-        (idx, idy)
-        for idx in range(row - 1)
-        for idy in range(idx + 1, row)
-    ]
+    tasks = [(idx, idy) for idx in range(row - 1) for idy in range(idx + 1, row)]
 
     results = Parallel(n_jobs=n_jobs)(
         delayed(compute_ccf_pair)(
-            idx, idy, data, station, coord, window_idx,
-            operator, taper, cor_time_begin_idx, cor_time_end_idx, used_lag_time
+            idx,
+            idy,
+            data,
+            station,
+            coord,
+            window_idx,
+            operator,
+            taper,
+            cor_time_begin_idx,
+            cor_time_end_idx,
+            used_lag_time,
         )
-        for idx, idy in tqdm(tasks, desc='Computing CCFs...')
+        for idx, idy in tqdm(tasks, desc="Computing CCFs...")
     )
 
-    ccf_dict = defaultdict(list)
-    ccf_distance = defaultdict(list)
+    ccf_dict = dict()
+    ccf_distance = dict()
 
     for result in results:
         if result is not None:
             key, ccf_data, dist_info = result
-            ccf_dict[key].append(ccf_data)
-            ccf_distance[key].append(dist_info)
+
+            ccf_dict[key] = ccf_data
+            ccf_distance[key] = dist_info
 
     return ccf_dict, ccf_distance
-
-
-
-
-if __name__ == '__main__':
-    from pathlib import Path
-    from scipy.fft import next_fast_len
-
-    input_dir = '/media/wdp/disk4/site1_line1/gate1/pre_gate_data/*Z.sac'
-    output_dir = Path('/media/wdp/disk4/site1_line1/CCF_gate_ZZ')
-    st = read(input_dir)
-    st.detrend('demean')
-    st.detrend('linear')
-
-    coord = read_coord('/media/wdp/disk4/site1_line1/gate1/pre_gate_data/xy.txt') # station coordinate, (x, y), for linear, y = 0
-    operator = np.ones(10) / 10
-    dt = np.around(st[0].stats.delta, 4)
-    win_sec = 60  # window length (s)
-    win_len = next_fast_len(int(win_sec / dt))
-    step = int(0.5 * win_len)
-    freq_min = 1
-    freq_max = 40
-    cor_time_begin = -10  # s
-    cor_time_end = 10
-    
-    print('\n')
-    print("-----------------Clear-------------------------")
-    
-    ccf_dict, ccf_distance = get_ccf_parallel(
-        stream=st,
-        operator=operator,
-        taper=0.05,
-        win_len=win_len,
-        step=step,
-        coord=coord,
-        cor_time_begin=cor_time_begin,
-        cor_time_end=cor_time_end,
-        n_jobs=36,
-    )
-
-    write_ccf_parallel(ccf_dict, ccf_distance, 
-              output_dir=output_dir, 
-              freq_min=freq_min, 
-              freq_max=freq_max, 
-              dt=dt, 
-              start_time=cor_time_begin,
-              method='pws', 
-              nu=2.0,
-              n_jobs=36)
-    
-    print("-----------------Done-------------------------\n")
-
-

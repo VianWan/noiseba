@@ -8,4 +8,4 @@ def rhoesi(vp):
 
 def vs2vp(vs):
     # return vs * ((1. - poisson) / (0.5 - poisson))**0.5
-    return np.array(vs) * 4
+    return np.array(vs) * 2.0
