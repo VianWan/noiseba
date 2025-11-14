@@ -1,11 +1,11 @@
+import math
 import numpy as np
 from joblib import Parallel, delayed
 from tqdm import trange
 from typing import Union, Optional
 
 
-
-class CDO:
+class CDOL:
     def __init__(
         self,
         objective_function,
@@ -21,7 +21,7 @@ class CDO:
         total_misfit_threshold: Optional[float] = None,
     ):
         r"""
-        Cloud Drift Optimization (CDO)
+        Cloud Drift Optimization with Levy flight (CDOL)
 
         Parameters
         ----------
@@ -46,7 +46,7 @@ class CDO:
         model_norm : float, optional
             Target model norm.
         total_misfit_threshold : float, optional
-            Global fitness threshold for early stopping.
+            Global fitness threshold for early stopping..
         """
         if dimension is None:
             raise ValueError("Dimension must be specified")
@@ -59,6 +59,10 @@ class CDO:
         self.fobj = objective_function
         self.n_jobs = njobs
         self.rng = np.random.default_rng(rng_seed)
+        self.levy_threshold = 5  # 连续未改善迭代数触发 Levy
+        self.mutation_factor = 0.05  # 高斯突变基准强度
+        self.levy_beta = 1.5  # Levy 指数
+        self.stag_counter = np.zeros(self.N, dtype=int)  # 个体停滞计数器
 
         # --- stopping criteria ---
         self.chi_factor = chi_factor
@@ -191,33 +195,75 @@ class CDO:
         self.weights = np.where(rank.reshape(-1, 1) <= self._half, 1 + factor, 1 - factor)
 
     # ---------------- vectorized position update ----------------
+
+    def _levy_flight(self, n):
+        sigma = (
+            math.gamma(1 + self.levy_beta)
+            * np.sin(np.pi * self.levy_beta / 2)
+            / (math.gamma((1 + self.levy_beta) / 2) * self.levy_beta * 2 ** ((self.levy_beta - 1) / 2))
+        ) ** (1 / self.levy_beta)
+        u = self.rng.normal(0, sigma, (n, self.dim))
+        v = self.rng.normal(0, 1, (n, self.dim))
+        step = u / (np.abs(v) ** (1 / self.levy_beta))
+        # map to bounded space
+        return np.clip(self.gbest_position + 0.01 * step * (self.ub - self.lb), self.lb, self.ub)
+
     def _move_particles(self, fitness, a, b, iteration):
+        """
+        Enhanced late-stage exploration:
+        1. Dual-behaviour: elite vs. diversified
+        2. Adaptive Gaussian mutation
+        3. Levy-flight restart for stagnated particles
+        4. Dynamic weight re-scaling
+        """
         z = 0.002 + 0.003 * b
         mask_restart = self.rng.random(self.N) < z
         self.particle[mask_restart] = self.rng.uniform(self.lb, self.ub, (mask_restart.sum(), self.dim))
+        self.stag_counter[mask_restart] = 0  # reset stagnation
 
-        # --- remaining particles ---
-        active = ~mask_restart
+        # --- Levy restart for long-stagnant individuals ---
+        levy_mask = self.stag_counter >= self.levy_threshold
+        if np.any(levy_mask):
+            self.particle[levy_mask] = self._levy_flight(levy_mask.sum())
+            self.stag_counter[levy_mask] = 0
+
+        # --- dual-behaviour update ---
+        active = ~(mask_restart | levy_mask)
         idx_active = np.where(active)[0]
         if idx_active.size == 0:
             return
 
-        p = np.tanh(np.abs(fitness[active] - self.gbest_fitness))
+        p = np.tanh(np.abs(fitness[idx_active] - self.gbest_fitness))
+        # mutation variance increases towards the end
+        mut_strength = self.mutation_factor * (1 + 5 * iteration / self.max_iter)
+
         vb = self.rng.uniform(-0.2 * a, 0.2 * a, (idx_active.size, self.dim))
         vc = self.rng.uniform(-0.2 * b, 0.2 * b, (idx_active.size, self.dim))
         A = self.rng.integers(0, self.N, idx_active.size)
         B = self.rng.integers(0, self.N, idx_active.size)
 
-        r = self.rng.random((idx_active.size, self.dim))
-        cond = r < p.reshape(-1, 1)
+        # elite vs diversified strategy
+        elite_mask = idx_active <= self._half
         delta = 0.8 * vb * (self.weights[idx_active] * self.particle[A] - self.particle[B])
-        self.particle[idx_active] = np.where(cond, self.gbest_position + delta, vc * self.particle[idx_active])
 
-        # --- micro-perturbation in late stage ---
+        new_pos = np.empty_like(self.particle[idx_active])
+        new_pos[elite_mask] = self.gbest_position + delta[elite_mask]
+        new_pos[~elite_mask] = vc[~elite_mask] * self.particle[idx_active][~elite_mask]
+
+        # adaptive Gaussian mutation
+        noise = self.rng.normal(0, mut_strength, new_pos.shape)
+        new_pos += noise * (1 - np.abs(new_pos - self.gbest_position) / (self.ub - self.lb + 1e-20))
+
+        # late-stage micro-perturbation
         if iteration > 0.9 * self.max_iter:
-            self.particle[idx_active] *= 1 - self.rng.random((idx_active.size, self.dim)) * 1e-12
+            new_pos *= 1 - self.rng.random(new_pos.shape) * 1e-12
 
-        self.particle = np.clip(self.particle, self.lb, self.ub)
+        self.particle[idx_active] = np.clip(new_pos, self.lb, self.ub)
+
+        # --- update stagnation counter ---
+        improved = fitness < self.pbest_fitness
+        self.stag_counter[improved] = 0
+        self.stag_counter[~improved] += 1
 
     # ---------------- history helpers ----------------
     def _record_iteration(self, iteration, curr_chi, curr_model_norm, fitness):

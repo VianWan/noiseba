@@ -8,8 +8,7 @@ __version__      = "0.1.0"
 __license__      = "MIT"
 __url__          = "https://github.com/yourname/mypkg"
 
-from .preprocessing import preprocess
-from .utils import stream_data, plot_phase_velocity_curves, plot_sensitivity, plot_velocity_profile
+from .utils import stream_to_array, plot_phase_velocity_curves, plot_sensitivity, plot_velocity_profile
 
 
 __all__ = [

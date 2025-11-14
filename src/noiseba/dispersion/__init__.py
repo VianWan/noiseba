@@ -15,15 +15,17 @@ In practice, we recommend the following two-step strategy:
 If highest lateral resolution is required, the FJ method is the best single option, provided the extra dependency is acceptable.
 """
 
-
-from .fjdisp import fj_spectra
-from .parkdisp import park, parkdispersion
-from .maps import maps
-from .radondisp import radon
+from .fj import fj_from_dir, fj_from_stream
+from .parkdisp import park_from_dir, park_from_stream
+from .maps import maps_from_dir, maps_from_stream
+from .radondisp import radon_from_dir, radon_from_stream
 
 __all__ = [
-    'fj_spectra',
-    'park',
-    'maps',
-    'radon'
-]
+    "maps", 
+    "fj_from_dir",
+    "fj_from_stream", 
+    "park_from_dir", 
+    "park_from_stream", 
+    "radon_from_dir", 
+    "radon_from_stream"
+    ]

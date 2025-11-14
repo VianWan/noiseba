@@ -1,195 +1,234 @@
-from typing import Union, Optional
+from typing import Union, Optional, Tuple
 
 import numpy as np
 import matplotlib.pyplot as plt
 
 from scipy.ndimage import gaussian_filter
 from pathlib import Path
-from obspy import read
+from obspy import read, Stream
 
-from noiseba.utils import stream_data
+from noiseba.utils import stream_to_array
 
 
 # offset start from where is not import, means (0,2,4..) has the same result as (-4,-2,0,...) offset, dx is important
 
-def parkdispersion(data, offset, dt, cmin, cmax, dc, fmin, fmax):
-    """Dispersion panel
-    
-    `Acitve source` Calculate dispersion curves using the method of
-    Park et al. 1998
-    
+
+def parkdispersion(
+    data: np.ndarray,
+    offset: np.ndarray,
+    dt: float,
+    cmin: float,
+    cmax: float,
+    nc: int,
+    fmin: float,
+    fmax: float,
+    ax: Optional[plt.Axes] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Active-source dispersion spectrum (Park et al. 1998).
+
     Parameters
     ----------
-    data : :obj:`numpy.ndarray`
-        Data of size `(nx, nt)`
-    offset : :obj:`np.ndarray`
-        distance from source to receiver
-    dt : :obj:`float`
-        Time sampling
-    cmin : :obj:`float`
-        Minimum velocity
-    cmax : :obj:`float`
-        Maximum velocity
-    dc : :obj:`float`
-        Velocity sampling
-    fmax : :obj:`float`
-        Maximum frequency
-        
+    data : np.ndarray
+        Shot gathers, shape (nx, nt).
+    offset : np.ndarray
+        Source-receiver offsets (m).
+    dt : float
+        Time sampling (s).
+    cmin, cmax : float
+        Min / max phase-velocity (m/s).
+    nc : int
+        Number of velocity samples.
+    fmin, fmax : float
+        Frequency band (Hz).
+    ax : matplotlib.axes.Axes, optional
+        Axes for plotting.  Created internally if None.
+
     Returns
     -------
-    f : :obj:`numpy.ndarray`
-        Frequency axis
-    c : :obj:`numpy.ndarray`
-        Velocity axis`
-    disp : :obj:`numpy.ndarray`
-        Dispersion panel of size `nc x nf`
+    f : np.ndarray
+        Frequency axis (Hz).
+    c : np.ndarray
+        Velocity axis (km/s).
+    spectrum : np.ndarray
+        Normalised dispersion image, shape (nc, len(f)).
     """
-    nr, nt = data.shape
+    nt = data.shape[1]
+    f = np.fft.rfftfreq(nt, dt)
+    mask = (f >= fmin * 0.9) & (f <= fmax * 1.1)
+    f = f[mask]
 
-    f = np.fft.fftfreq(nt, dt)[:nt//2]
-    df = f[1] - f[0]
-    fmax = min(fmax, f[-1])
-    fmin = max(fmin, f[0])
-    f_ind = np.where((f >= fmin * 0.9 ) & (f <= fmax * 1.1))[0]
-    f = f[f_ind]
+    # ---- velocity axis ----
+    c = np.linspace(cmin, cmax, nc)
+    offset_length = offset.max() - offset.min()
 
-    c = np.linspace(cmin, cmax, dc)  # set phase velocity range
-    array_length = np.abs(offset.max() - offset.min())
-    x = offset
+    # ---- frequency-domain data ----
+    U = np.fft.rfft(data, axis=1)[:, mask]  # (nx, nf)
 
-    # spectrum
-    U = np.fft.fft(data, axis=1)[:, :nt//2]
-    U = U[:, f_ind]
+    spectrum = np.empty((nc, f.size), dtype=np.float32)
+    for i, freq in enumerate(f):
+        k = 2 * np.pi * freq / c  # wavenumber (dc,)
+        phase = np.exp(1j * np.outer(k, offset))  # (dc, nx)
+        spectrum[:, i] = np.abs(phase @ U[:, i])  # stack
 
-    # Dispersion panel
-    disp = np.zeros((len(c), len(f)))
-    for fi in range(f.size):
-        for ci in range(len(c)):
-            k = 2.0*np.pi*f[fi]/(c[ci])
-            disp[ci, fi] = np.abs(
-                np.dot(np.exp(1.0j*k*x), U[:, fi]/np.abs(U[:, fi])))
-    
-    image = disp.copy()
-    image[image <= 0] = 0
-    image[np.isnan(image)] = 1
-    image /= np.maximum(image.max(axis=0, keepdims=True), 1e-8)
-    image = image ** 2
+    # ---- post-processing ----
+    spectrum[spectrum <= 0] = 0
+    spectrum /= np.maximum(spectrum.max(axis=0, keepdims=True), 1e-8)
+    spectrum **= 2
+    spectrum = gaussian_filter(spectrum, sigma=3)
+    spectrum /= spectrum.max()
 
-    # # Apply Gaussian smoothing to the normalized dispersion spectrum
-    sigma_value = 3  # Adjust this value to reduce smoothing
-    smoothed_disp_spectrum = gaussian_filter(image, sigma=sigma_value)
-    normalized_smoothed_disp_spectrum = smoothed_disp_spectrum / np.max(smoothed_disp_spectrum)
-    norm_min = np.min(normalized_smoothed_disp_spectrum)
-    norm_max = np.max(normalized_smoothed_disp_spectrum)
+    # ---- plotting ----
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(13, 6))
+    else:
+        fig = ax.figure
 
-    fig, ax = plt.subplots(1, 1, figsize=(13, 6))
-    cax = ax.pcolormesh(f, c / 1e3, normalized_smoothed_disp_spectrum, 
-                        cmap='Spectral_r', vmin=norm_min, vmax=norm_max,  rasterized=True)
-    ax.plot(f, f * array_length / 1e3, 'w--', lw=2, label=r"$\lambda$")
-    ax.set_xlim((f.min(), f.max()))
-    ax.set_ylim((c.min() / 1e3, c.max() / 1e3))
-
-    ax.set_xlabel('Frequency (Hz)', fontsize=24)
-    ax.set_ylabel('Phase Velocity (km/s)', fontsize=24)
-    ax.set_title('Dispersion Spectrum', fontsize=24)
+    im = ax.pcolormesh(f, c / 1e3, spectrum, cmap="Spectral_r", vmin=0, vmax=1, rasterized=True)
+    ax.plot(f, f * offset_length / 1e3, "w--", lw=2, label=r"$\lambda$")
+    ax.set_xlim(f[0], f[-1])
+    ax.set_ylim(c[0] / 1e3, c[-1] / 1e3)
+    ax.set_xlabel("Frequency (Hz)", fontsize=24)
+    ax.set_ylabel("Phase Velocity (km/s)", fontsize=24)
+    ax.set_title("Dispersion Spectrum", fontsize=24)
+    ax.tick_params(labelsize=24)
     ax.legend(
-        fontsize=20,          # 字体大小
-        markerscale=1.5,      # 图标大小
-        loc='upper right',    # 图例位置
-        frameon=True,         # 显示边框
-        facecolor='white',    # 背景颜色
-        edgecolor='black',    # 边框颜色
-        framealpha=0.8        # 背景透明度
+        fontsize=20, 
+        markerscale=1.5,  
+        loc="upper right",  
+        frameon=True,
+        facecolor="white",  
+        edgecolor="black",  
+        framealpha=0.8,
     )
-    ax.tick_params(axis='both', labelsize=24)
-
-    cbar = fig.colorbar(cax, ax=ax)
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("Normalised Spectrum", fontsize=24)
     cbar.ax.tick_params(labelsize=24)
-    cbar.set_label('Normalized Spectrum', size=24)
-    fig.savefig('Park.png', dpi=300, bbox_inches='tight')
+    plt.tight_layout()
     plt.show()
-    
-    # return f, c, disp
+
+    return f, c, spectrum
 
 
-def park(dirpath: Union[str, Path], 
-         freq_min: Optional[float] = None, 
-         freq_max: Optional[float] = None, 
-         vel_min : float = 100., 
-         vel_max: float = 500, 
-         num_vel: int = 101, 
-         part: str = 'right'):
-    """
-    `Ambient noise` Compute and plot dispersion spectrum using phase-shift (time domain) method.
-
-    Args:
-        dirpath (`Path | Str`): 
-            path stored the cross-correlation data
-        freq_min (`float`):
-            Minimum frequency to scan.
-        freq_max (`float`):
-            Maximum frequency to scan.
-        vel_min (`float`):
-            Minimum phase velocity to scan.
-        vel_max (`float`):
-            Maximum phase velocity to scan.
-        num_vel (`int`):
-            Number of phase velocity samples.
-        part (`str`):
-            'right', 'left', or 'both' side of CCF to use.
-    """
-    dirpath = Path(dirpath).joinpath('COR*.sac')
-    st = read(dirpath)
-
+def prepare_ccf_data(st: Stream, part: str = "right"):
     dt = np.around(st[0].stats.delta, 4)
-    dist = np.array([i.stats.sac.dist for i in st])
+    dist = np.array([tr.stats.sac.dist for tr in st])
     ind = np.argsort(dist)
-    data, _ = stream_data(st)
+    data, _ = stream_to_array(st)
 
     data = data[ind]
     dist = dist[ind]
-    
+
+    valid_rows = ~np.all(data == 0, axis=1)
+    data = data[valid_rows]
+    dist = dist[valid_rows]
+
     uniq_dist = np.unique(dist)
     I = np.ones((len(uniq_dist), data.shape[1]))
-    for ind, udist in enumerate(uniq_dist):
-        I[ind] = np.mean(data[udist == dist], axis=0)
-    
-    # choise NCF part to calculate
+    for idx, udist in enumerate(uniq_dist):
+        I[idx] = np.mean(data[dist == udist], axis=0)
+
     num_samples = I.shape[1]
-    if part == 'right':
-        ccf = I[:, num_samples // 2:]
-    
-    elif part == 'left':
-        ccf = np.fliplr(I[:, :num_samples // 2 +1])
-   
-    elif part == 'both':
-        ccf_left = np.fliplr(I[:, :num_samples // 2])
-        ccf_right = I[:, num_samples // 2:]
-        ccf = np.empty_like(ccf_right)
-
+    if part == "right":
+        ccf = I[:, num_samples // 2 :]
+    elif part == "left":
+        ccf = np.fliplr(I[:, : num_samples // 2 + 1])
+    elif part == "both":
+        ccf_left = np.fliplr(I[:, : num_samples // 2])
+        ccf_right = I[:, num_samples // 2 :]
         if num_samples % 2 == 0:
-           ccf = 0.5 * (ccf_left + ccf_right)
-
+            ccf = 0.5 * (ccf_left + ccf_right)
         else:
+            ccf = np.empty_like(ccf_right)
             ccf[:, 0] = ccf_right[:, 0]
             ccf[:, 1:] = 0.5 * (ccf_left + ccf_right[:, 1:])
-   
     else:
         raise ValueError('part must be "right", "left" or "both"')
-    
-    time_window = 10 # only need the part of NCF that include surface wave
-    window_ind = int(time_window / dt)
-    ccf = ccf[:, :window_ind+1]
+
+
+    return ccf, uniq_dist, dt
+
+
+def park_from_dir(
+    dirpath: Union[str, Path],
+    freq_min: Optional[float] = None,
+    freq_max: Optional[float] = None,
+    vel_min: float = 100.0,
+    vel_max: float = 500.0,
+    num_vel: int = 101,
+    part: str = "right",
+):
+    """
+    Compute and plot dispersion spectrum using phase-shift (time domain) method from SAC files.
+
+    Parameters
+    ----------
+    dirpath : str or Path
+        Directory containing cross-correlation SAC files (pattern: 'CCF*.sac').
+    freq_min, freq_max : float, optional
+        Frequency bounds for scanning (Hz).
+    vel_min, vel_max : float
+        Minimum and maximum phase velocity (m/s).
+    num_vel : int
+        Number of velocity samples.
+    part : str
+        Part of the CCF to use for dispersion calculation ('left', 'right' or 'both').
+
+    Returns
+    -------
+    None
+        Displays or saves the dispersion spectrum.
+    """
+    st = read(Path(dirpath).joinpath("CCF*.sac"))
+    ccf, uniq_dist, dt = prepare_ccf_data(st, part)
 
     freq_min = freq_min if freq_min is not None else 0
     freq_max = freq_max if freq_max is not None else st[0].stats.sampling_rate / 2
-    
-    parkdispersion(ccf, uniq_dist, dt, vel_min, vel_max, num_vel, freq_min, freq_max)
 
+    f, c, spectrum = parkdispersion(ccf, uniq_dist, dt, vel_min, vel_max, num_vel, freq_min, freq_max)
+    return f, c, spectrum
+
+
+def park_from_stream(
+    st: Stream,
+    freq_min: Optional[float] = None,
+    freq_max: Optional[float] = None,
+    vel_min: float = 100.0,
+    vel_max: float = 500.0,
+    num_vel: int = 101,
+    part: str = "left",
+):
+    """
+    Compute and plot dispersion spectrum using phase-shift (time domain) method from an ObsPy Stream.
+
+    Parameters
+    ----------
+    st : obspy.Stream
+        Stream object containing cross-correlation traces.
+    freq_min, freq_max : float, optional
+        Frequency bounds for scanning (Hz).
+    vel_min, vel_max : float
+        Minimum and maximum phase velocity (m/s).
+    num_vel : int
+        Number of velocity samples.
+    part : str
+        Part of the CCF to use for dispersion calculation ('left', 'right' or 'both').
+
+    Returns
+    -------
+    None
+        Displays or saves the dispersion spectrum.
+    """
+    ccf, uniq_dist, dt = prepare_ccf_data(st, part)
+
+    freq_min = freq_min if freq_min is not None else 0
+    freq_max = freq_max if freq_max is not None else st[0].stats.sampling_rate / 2  # type: ignore
+
+    f, c, spectrum = parkdispersion(ccf, uniq_dist, dt, vel_min, vel_max, num_vel, freq_min, freq_max)
+    return f, c, spectrum
 
 
 if __name__ == "__main__":
+    dirpath = Path("/media/wdp/disk4/git/noiseba1/examples/CCF")
 
-    dirpath = Path('/media/wdp/disk4/site1_line1/CCF_gate_EE')
-
-    park(dirpath, freq_min=0.01, freq_max=45, vel_min=100, vel_max=500, num_vel=101, part='both')
+    park_from_dir(dirpath, freq_min=0.1, freq_max=45, vel_min=50, vel_max=500, num_vel=101, part="left")

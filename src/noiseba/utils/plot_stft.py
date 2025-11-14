@@ -21,12 +21,12 @@ def plot_stft(stream, win_sec=5.0, overlap=0.5, china=False):
 
     nperseg = int(win_sec * fs) # points
     noverlap = int(nperseg * overlap)
-    f, t, Zxx = stft(data, fs=fs, nperseg=nperseg, noverlap=noverlap)
+    f, t, Zxx = stft(data, fs=fs, nperseg=nperseg, noverlap=noverlap, scaling='spectrum')
 
     if china:
         start_time = tr.stats.starttime.datetime + timedelta(hours=8)
     else:
-        start_time = tr.stats.starttime
+        start_time = tr.stats.starttime.datetime
 
     times_sec = [start_time + timedelta(seconds=s) for s in tr.times()]
     t_sec = [start_time + timedelta(seconds=s) for s in t]
@@ -39,7 +39,8 @@ def plot_stft(stream, win_sec=5.0, overlap=0.5, china=False):
     ax1.spines['bottom'].set_visible(False)
     ax1.tick_params(axis='x', which='both', bottom=False)
 
-    norm = LogNorm(vmin=1e-5, vmax=1)
+    abs_Zxx = np.abs(Zxx)
+    norm = LogNorm(vmin=1, vmax=30)
     im = ax2.pcolormesh(t_sec, f, np.abs(Zxx), shading='auto', cmap='plasma', norm=norm)
     ax2.set_ylabel("Freq (Hz)", fontsize=11)
     ax2.set_xlabel("Time (s)", fontsize=11)
@@ -55,6 +56,7 @@ def plot_stft(stream, win_sec=5.0, overlap=0.5, china=False):
     cbar.ax.tick_params(which='minor', bottom=False)
     # plt.show()
     fig.savefig('STFT.png', dpi=300, bbox_inches='tight')
+    # return t, t_sec
 
 if __name__ == '__main__':
     

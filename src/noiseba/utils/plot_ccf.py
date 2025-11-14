@@ -1,12 +1,61 @@
 import matplotlib.pyplot as plt
 import numpy as np
+from pathlib import Path
+from obspy.core import read
 
-from noiseba.preprocessing import stack_ccf
+from .stack_utils import batch_hilbert_mkl
+from .stream_to_array import stream_to_array
 
+def stack_ccf(
+    ccf2: np.ndarray,
+    method: str = "linear",
+    nu: float = 2.0,
+) -> np.ndarray:
+    """
+    Stack cross-correlation functions (CCFs) using linear or phase-weighted stack.
+
+    Parameters
+    ----------
+    ccf_data : np.ndarray
+        Array of shape (n_segments, n_lags) or (n_lags,).
+    method : {"linear", "pws"}, optional
+        Stacking method. "linear" for simple average;
+        "pws" for phase-weighted stack, by default "linear".
+    nu : float, optional
+        Exponent for phase weighting (PWS). Must be > 0, usually between 1 to 4, by default 2.0.
+
+    Returns
+    -------
+    np.ndarray
+        Stacked CCF of shape (n_lags,).
+
+    Raises
+    ------
+    ValueError
+        If an unknown method is provided or `nu` is not positive.
+    """
+    if nu <= 0:
+        raise ValueError("Parameter 'nu' must be positive for PWS.")
+
+    arr = np.atleast_2d(ccf2)
+
+    method = method.lower()
+    ccf_linear = np.nanmean(arr, axis=0)
+
+    if method == "linear":
+        return ccf_linear
+
+    if method == "pws":
+        analytic = batch_hilbert_mkl(arr, axis=1)
+        phase_vectors = analytic / (np.abs(analytic) + 1e-12)
+        coherence = np.abs(phase_vectors.mean(axis=0)) ** nu
+        return ccf_linear * coherence
+
+    raise ValueError("Unknown method. Use 'linear' or 'pws'.")
 
 def plot_ccf(
-    ccf_dict,
-    ccf_distance,
+    ccf,
+    distance,
     dt,
     time_window=1,
     vmin=None,
@@ -15,133 +64,72 @@ def plot_ccf(
     plot_kwargs=None,
 ):
     """
-    Plot cross-correlation functions (CCFs) with distance sorting and optional velocity lines.
+    Plot stacked cross-correlation functions (CCFs) sorted by interstation distance.
 
-    Parameters:
-    -----------
-    ccf_dict : dict
-        Dictionary containing CCF data for each station pair
-    ccf_distance : dict
-        Dictionary containing inter-station distances
+    Parameters
+    ----------
+    ccf : np.ndarray
+        Cross-correlation matrix (N × T).
+    distance : np.ndarray
+        Interstation distances for each CCF trace.
     dt : float
-        Sampling interval (seconds)
+        Sampling interval in seconds.
     time_window : float, optional
-        Time range to display around zero lag (default: 1 second)
-    vmin : float, optional
-        Minimum velocity for reference line (m/s)
-    vmax : float, optional
-        Maximum velocity for reference line (m/s)
+        Time range around zero lag to display.
+    vmin, vmax : float, optional
+        Reference velocities (m/s) for overlay lines.
     axes : matplotlib.axes.Axes, optional
-        Axes object to plot on (default: creates new figure)
+        Target axes for plotting.
     plot_kwargs : dict, optional
-        Additional keyword arguments for plotting CCFs
+        Additional arguments for `Axes.plot`.
     """
+    uniq_dist = np.unique(distance)
+    ccfs_array = np.zeros((uniq_dist.size, ccf.shape[1]))
 
-    # Extract and stack CCF data
-    stacked_ccfs = []
-    distances = []
+    for i, dist in enumerate(uniq_dist):
+        ccfs_array[i] = stack_ccf(ccf[distance == dist], method="pws", nu=2.0)
 
-    for station_pair, ccf_data in ccf_dict.items():
-        # Stack CCF data using linear method
-        stacked_data = stack_ccf(ccf_data, method="pws", nu=2.0)
-        distance = ccf_distance[station_pair][0]
-
-        stacked_ccfs.append(stacked_data)
-        distances.append(distance)
-
-    # Convert to numpy arrays and sort by distance
-    ccfs_array = np.r_[stacked_ccfs]
-    distance_array = np.array(distances)
-
-    # Sort CCFs based on inter-station distances
-    sorted_indices = np.argsort(distance_array)
-    ccfs_array = ccfs_array[sorted_indices]
-    distance_array = distance_array[sorted_indices]
-
-    # Ensure odd length for symmetric time axis
     ccfs_array = ensure_odd_length(ccfs_array)
+    ccfs_array /= np.maximum(np.max(ccfs_array, axis=1, keepdims=True), 1e-8)
 
-    # Create symmetric time axis
-    half_length = ccfs_array.shape[1] // 2
-    time_axis = np.arange(-half_length, half_length + 1) * dt
+    half_len = ccfs_array.shape[1] // 2
+    time_axis = np.arange(-half_len, half_len + 1) * dt
+    mask = (time_axis >= -time_window) & (time_axis <= time_window)
+    trimmed_ccfs = ccfs_array[:, mask]
+    trimmed_time = time_axis[mask]
 
-    # Trim data to only show requested time window
-    time_mask = (time_axis >= -time_window) & (time_axis <= time_window)
-    trimmed_ccfs = ccfs_array[:, time_mask]
-    trimmed_time = time_axis[time_mask]
+    # Velocity reference lines
+    t_pos = np.arange(0, time_window, dt)
+    vmin_line = vmin * t_pos if vmin else None
+    vmax_line = vmax * t_pos if vmax else None
 
-    # Generate time vectors for velocity lines
-    positive_time = np.arange(0, time_window, dt)
-
-    # Calculate velocity lines if parameters provided
-    vmin_line = vmin * positive_time if vmin is not None else None
-    vmax_line = vmax * positive_time if vmax is not None else None
-
-    # Create figure and axes if not provided
     if axes is None:
-        fig, axes = plt.subplots(figsize=(10, 7))
-
-    # Set default plot parameters if not provided
+        _, axes = plt.subplots(figsize=(10, 7))
     if plot_kwargs is None:
         plot_kwargs = {}
 
-    # Plot each CCF with distance-based vertical positioning
-    scaling_factor = 5
     for i in range(trimmed_ccfs.shape[0]):
-        axes.plot(
-            trimmed_time,
-            trimmed_ccfs[i] * scaling_factor + distance_array[i],
-            color="k",
-            **plot_kwargs,
-        )
+        axes.plot(trimmed_time, trimmed_ccfs[i] + uniq_dist[i], color="k", **plot_kwargs)
 
-    # Add velocity reference lines if provided
     if vmin_line is not None:
-        axes.plot(
-            positive_time,
-            vmin_line,
-            color="r",
-            ls="--",
-            lw=1.5,
-            label=f"Vmin: {vmin} m/s",
-        )
-        axes.plot(
-            -positive_time,
-            vmin_line,
-            color="r",
-            ls="--",
-            lw=1.5,
-            # label=f"Vmin: {vmin} m/s",
-        )
+        axes.plot(t_pos, vmin_line, color="r", ls="--", lw=1.5, label=f"Vmin: {vmin} m/s")
+        axes.plot(-t_pos, vmin_line, color="r", ls="--", lw=1.5)
 
     if vmax_line is not None:
-        axes.plot(
-            positive_time,
-            vmax_line,
-            color="b",
-            ls="--",
-            lw=1.5,
-            label=f"Vmax: {vmax} m/s",
-        )
-        axes.plot(
-            -positive_time,
-            vmax_line,
-            color="b",
-            ls="--",
-            lw=1.5,
-            # label=f"Vmax: {vmax} m/s",
-        )
+        axes.plot(t_pos, vmax_line, color="b", ls="--", lw=1.5, label=f"Vmax: {vmax} m/s")
+        axes.plot(-t_pos, vmax_line, color="b", ls="--", lw=1.5)
 
-    # Configure plot appearance
-    axes.set_xlabel("Lag time (s)", fontsize=24)
-    axes.set_ylabel("Interstation distance (m)", fontsize=24)
-    axes.set_xlim(-time_window, time_window)
-    axes.set_ylim(distance_array.min() * 0.5, distance_array.max() * 1.05)
-    axes.grid(ls=":", lw=1.5, color="#AAAAAA")
+    axes.set(
+             xlim=(-time_window, time_window),
+             ylim=(uniq_dist.min() * 0.5, uniq_dist.max() * 1.05)
+             )
+    axes.set_xlabel("Lag time (s)", fontsize=18)
+    axes.set_ylabel("Interstation distance (m)", fontsize=18)
+
 
     # Add legend with styling
     axes.legend(
-        fontsize=12,
+        fontsize=15,
         markerscale=1.5,
         loc="upper right",
         frameon=True,
@@ -152,6 +140,37 @@ def plot_ccf(
 
     axes.tick_params(labelsize=18)
     plt.tight_layout()
+
+
+def plot_ccf_dir(
+    dirpath: Path,
+    time_window=1,
+    vmin=None,
+    vmax=None,
+):
+    """
+    Load SAC CCF files from directory and plot stacked cross-correlations.
+
+    Parameters
+    ----------
+    dirpath : Path
+        Directory containing SAC files matching 'CCF*.sac'.
+    time_window : float, optional
+        Time range around zero lag to display.
+    vmin, vmax : float, optional
+        Reference velocities (m/s) for overlay lines.
+    """
+    dirpath = Path(dirpath)
+    if not dirpath.is_dir():
+        raise ValueError("Invalid directory path.")
+    
+    st = read(str(dirpath.joinpath("CCF*.sac")))
+    data, _ = stream_to_array(st)
+    distance = np.array([tr.stats.sac.dist for tr in st])
+    dt = st[0].stats.delta
+    plot_ccf(data, distance, dt, time_window, vmin, vmax)
+
+
 
 
 def ensure_odd_length(data) -> np.array:  # type: ignore

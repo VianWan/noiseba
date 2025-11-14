@@ -14,7 +14,9 @@ from typing import Union, Optional
 from pathlib import Path
 from joblib import Parallel, delayed
 
-from noiseba.utils import stream_data
+
+
+from noiseba.utils import stream_to_array
 from noiseba.optimization import cg_weight
 from noiseba.optimization import irls_cg
 
@@ -30,7 +32,8 @@ def _radon(
         tol: float = 1e-4,
         method: str = 'CG_weight',
         reg_lambda: float = 0.01,
-        norm: float = 2
+        norm: float = 2,
+        ax: Optional[plt.Axes] = None
 ):
     """
     Radon transform from t-d domina to τ-p domain
@@ -90,50 +93,24 @@ def _radon(
 
     for i, m in enumerate(results):
         M[:, i] = m
-
-
-    # for ind, f in enumerate(tqdm(freq,  desc="Processing frequencies")):
-        # L = np.exp(-1j * 2 * np.pi * f * dist_dot_slow)
-        # d = Dfft[:, ind]     # all tracea at same frequency
-        
-        # if method == 'CG_weight': # too slow
-        #     m = cg_weight(L, d, x0=m0, reg_lambda=1, max_iter=max_iter, tol=tol, norm=norm)
-        
-        # elif method == 'adj':
-        #     m = L.conj().T @ d
-        
-        # elif method == 'CG':
-        #     m, _ = cg(L.conj().T @ L, L.conj().T @ d, x0=m0, maxiter=max_iter, rtol=tol)
-        
-        # elif method == 'L1':
-        #     m = irls_cg(L, d, reg_lambda=reg_lambda, p=1, maxiter=max_iter, tol=tol)
-        
-        # elif method == 'L2':
-        #     m = irls_cg(L, d, reg_lambda=reg_lambda, p=2, maxiter=max_iter, tol=tol)
-        
-        # else:
-        #     raise ValueError('Only support Adj, CG, CG_weight, L1 and L2 methods')
-        
-        # M[:, ind] = m
         
     # mapping to frequency-velocity
-    f, phase_vel, image = freqslow2freqvel(freq, p, np.abs(M), num_vel)
-    image[image <= 0] = 0
-    image[np.isnan(image)] = 1
-    image /= np.maximum(image.max(axis=0, keepdims=True), 1e-6)
-    image = image ** 2
+    f, phase_vel, spectrum = freqslow2freqvel(freq, p, np.abs(M), num_vel)
 
-    # # Apply Gaussian smoothing to the normalized dispersion spectrum
-    sigma_value = 3  # Adjust this value to reduce smoothing
-    smoothed_disp_spectrum = gaussian_filter(image, sigma=sigma_value)
-    normalized_smoothed_disp_spectrum = smoothed_disp_spectrum / np.max(smoothed_disp_spectrum)
-    norm_min = np.min(normalized_smoothed_disp_spectrum)
-    norm_max = np.max(normalized_smoothed_disp_spectrum)
+    spectrum[spectrum <= 0] = 0
+    spectrum /= np.maximum(spectrum.max(axis=0, keepdims=True), 1e-8)
+    spectrum **= 2
+    spectrum = gaussian_filter(spectrum, sigma=3)
+    spectrum /= spectrum.max()
 
+    # ---- plotting ----
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(13, 6))
+    else:
+        fig = ax.figure
 
-    fig, ax = plt.subplots(1, 1, figsize=(13, 6))
-    cax = ax.pcolormesh(f, phase_vel / 1e3, normalized_smoothed_disp_spectrum, 
-                        cmap='Spectral_r', vmin=norm_min, vmax=norm_max,  rasterized=True)
+    cax = ax.pcolormesh(f, phase_vel / 1e3, spectrum, 
+                        cmap='Spectral_r', vmin=0, vmax=1, rasterized=True)
     ax.plot(f, f * array_length / 1e3, 'w--', lw=2, label=r"$\lambda$")
     ax.set_xlim((f.min(), f.max()))
     ax.set_ylim((phase_vel.min() / 1e3, phase_vel.max() / 1e3))
@@ -142,23 +119,23 @@ def _radon(
     ax.set_ylabel('Phase Velocity (km/s)', fontsize=24)
     ax.set_title('Dispersion Spectrum', fontsize=24)
     ax.legend(
-        fontsize=20,          # 字体大小
-        markerscale=1.5,      # 图标大小
-        loc='upper right',    # 图例位置
-        frameon=True,         # 显示边框
-        facecolor='white',    # 背景颜色
-        edgecolor='black',    # 边框颜色
-        framealpha=0.8        # 背景透明度
+        fontsize=20,         
+        markerscale=1.5,     
+        loc='upper right',   
+        frameon=True,        
+        facecolor='white',   
+        edgecolor='black',   
+        framealpha=0.8        
     )
     ax.tick_params(axis='both', labelsize=24)
 
     cbar = fig.colorbar(cax, ax=ax)
     cbar.ax.tick_params(labelsize=24)
     cbar.set_label('Normalized Spectrum', size=24)
+    plt.tight_layout()
     plt.show()
-    fig.savefig('radon.png', dpi=300, bbox_inches='tight')
+    return f, phase_vel, 
     
-    # # return phase_vel, M
 
 
 def freqslow2freqvel(f, p, data, num_vel: int = 101):
@@ -210,108 +187,160 @@ def solve_one_frequency(
         case _:
             raise ValueError(f"Unsupported method: {method}")
 
-def radon(dirpath: Union[str, Path], 
-         freq_min: Optional[float] = None, 
-         freq_max: Optional[float] = None, 
-         vel_min : float = 100., 
-         vel_max: float = 500, 
-         num_vel: int = 101, 
-         part: str = 'right',
-         maxiter: int = 100,
-         tol: float = 1e-1, 
-         method='CG_weight', 
-         reg_lambda=1e-2, 
-         norm=2
-         ):
-    """
-    Compute and plot the dispersion spectrum.
-
-    Parameters
-    ----------
-    dirpath : str or pathlib.Path
-        Directory that contains the cross-correlation functions files.
-    freq_min : float, optional
-        Lower frequency bound for the scan (Hz).  
-        If *None*, the lowest reliable frequency is used.
-    freq_max : float, optional
-        Upper frequency bound for the scan (Hz).  
-        If *None*, the highest reliable frequency is used.
-    vel_min : float, default 100
-        Minimum phase-velocity value to scan (m/s).
-    vel_max : float, default 500
-        Maximum phase-velocity value to scan (m/s).
-    num_vel : int, default 101
-        Number of phase-velocity samples between *vel_min* and *vel_max*.
-    part : {'right', 'left', 'both'}, default 'right'
-        Which side(s) of the cross-correlation function are used.
-    maxiter : int, default 100
-        Maximum iterations for the solver.
-    tol : float, default 0.1
-        Convergence tolerance.
-    method : str, default 'CG_weight'
-        Inversion algorithm: 'CG_weight', 'CG', 'LSQR', ...
-    reg_lambda : float, default 1e-2
-        Regularisation weight λ (trade-off parameter).
-    norm : int, default 2
-        L-norm order used in the regularisation term.
-
-    Returns
-    -------
-    spectrum : numpy.ndarray
-        2-D dispersion spectrum (velocity × frequency).
-    vels : numpy.ndarray
-        Velocity vector (m/s).
-    freqs : numpy.ndarray
-        Frequency vector (Hz).
-            
-        """
-    dirpath = Path(dirpath).joinpath('COR*.sac')
-    st = read(dirpath)
-
+def prepare_ccf_data(st, part: str = 'right', time_window: float = 2.0):
     dt = np.around(st[0].stats.delta, 4)
-    dist = np.array([i.stats.sac.dist for i in st])
+    dist = np.array([tr.stats.sac.dist for tr in st])
     ind = np.argsort(dist)
-    data, _ = stream_data(st)
+    data, _ = stream_to_array(st)
 
     data = data[ind]
     dist = dist[ind]
+
     
+    valid_rows = ~np.all(data == 0, axis=1)
+    data = data[valid_rows]
+    dist = dist[valid_rows]
+
     uniq_dist = np.unique(dist)
     I = np.ones((len(uniq_dist), data.shape[1]))
-    for ind, udist in enumerate(uniq_dist):
-        I[ind] = np.mean(data[udist == dist], axis=0)
-    
-    # slowness
-    p = np.linspace(1/vel_max, 1/vel_min, num_vel)
+    for idx, udist in enumerate(uniq_dist):
+        I[idx] = np.mean(data[dist == udist], axis=0)
 
-    # choise NCF casual or acasual part to calculate
+    
     num_samples = I.shape[1]
     if part == 'right':
         ccf = I[:, num_samples // 2:]
-    
     elif part == 'left':
-        ccf = np.fliplr(I[:, :num_samples // 2 +1])
-   
+        ccf = np.fliplr(I[:, :num_samples // 2 + 1])
     elif part == 'both':
         ccf_left = np.fliplr(I[:, :num_samples // 2])
         ccf_right = I[:, num_samples // 2:]
-        ccf = np.empty_like(ccf_right)
-
         if num_samples % 2 == 0:
-           ccf = 0.5 * (ccf_left + ccf_right)
-
+            ccf = 0.5 * (ccf_left + ccf_right)
         else:
+            ccf = np.empty_like(ccf_right)
             ccf[:, 0] = ccf_right[:, 0]
             ccf[:, 1:] = 0.5 * (ccf_left + ccf_right[:, 1:])
-   
     else:
         raise ValueError('part must be "right", "left" or "both"')
+
     
-    time_window = 2 # only need the part of NCF that include surface wave
     window_ind = int(time_window / dt)
-    ccf = ccf[:, :window_ind+1]
+    ccf = ccf[:, :window_ind + 1]
+
+    return ccf, uniq_dist, dt
+
+def radon_from_dir(dirpath: Union[str, Path], 
+                   freq_min: Optional[float] = None, 
+                   freq_max: Optional[float] = None, 
+                   vel_min: float = 100., 
+                   vel_max: float = 500., 
+                   num_vel: int = 101, 
+                   part: str = 'right',
+                   maxiter: int = 100,
+                   tol: float = 1e-1, 
+                   method: str = 'CG_weight', 
+                   reg_lambda: float = 1e-2, 
+                   norm: int = 2):
+    """
+    Compute and plot dispersion spectrum using Radon transform from SAC files in a directory.
+
+    Parameters
+    ----------
+    dirpath : str or Path
+        Directory containing cross-correlation SAC files (pattern: 'CCF*.sac').
+    freq_min, freq_max : float, optional
+        Frequency bounds for scanning (Hz).
+    vel_min, vel_max : float
+        Minimum and maximum phase velocity (m/s).
+    num_vel : int
+        Number of velocity samples.
+    part : {'right', 'left', 'both'}
+        Which side(s) of the CCF to use.
+    maxiter : int
+        Maximum iterations for inversion.
+    tol : float
+        Convergence tolerance.
+    method : str
+        Inversion method ('CG_weight', 'CG', 'LSQR', etc.).
+    reg_lambda : float
+        Regularization weight λ.
+    norm : int
+        L-norm order for regularization.
+
+    Returns
+    -------
+    None
+        Displays or saves the dispersion spectrum.
+    """
+    st = read(Path(dirpath).joinpath('CCF*.sac'))
+    ccf, uniq_dist, dt = prepare_ccf_data(st, part)
 
     freq_min = freq_min if freq_min is not None else 0
     freq_max = freq_max if freq_max is not None else st[0].stats.sampling_rate // 2
+    p = np.linspace(1 / vel_max, 1 / vel_min, num_vel)
+
+    return _radon(ccf, p, dt, uniq_dist, freq_min, freq_max,
+           num_vel=num_vel, max_iter=maxiter, tol=tol,
+           method=method, reg_lambda=reg_lambda, norm=norm)
     
-    _radon(ccf, p, dt, uniq_dist, freq_min, freq_max, num_vel=num_vel, max_iter=maxiter, tol=tol, method=method, reg_lambda=reg_lambda, norm=norm)
+
+def radon_from_stream(st, 
+                      freq_min: Optional[float] = None, 
+                      freq_max: Optional[float] = None, 
+                      vel_min: float = 100., 
+                      vel_max: float = 500., 
+                      num_vel: int = 101, 
+                      part: str = 'right',
+                      maxiter: int = 100,
+                      tol: float = 1e-1, 
+                      method: str = 'CG_weight', 
+                      reg_lambda: float = 1e-2, 
+                      norm: int = 2):
+    """
+    Compute and plot dispersion spectrum using Radon transform from an ObsPy Stream.
+
+    Parameters
+    ----------
+    st : obspy.Stream
+        Stream object containing cross-correlation traces.
+    freq_min, freq_max : float, optional
+        Frequency bounds for scanning (Hz).
+    vel_min, vel_max : float
+        Minimum and maximum phase velocity (m/s).
+    num_vel : int
+        Number of velocity samples.
+    part : {'right', 'left', 'both'}
+        Which side(s) of the CCF to use.
+    maxiter : int
+        Maximum iterations for inversion.
+    tol : float
+        Convergence tolerance.
+    method : str
+        Inversion method ('CG_weight', 'CG', 'L1', etc.).
+    reg_lambda : float
+        Regularization weight λ.
+    norm : int
+        L-norm order for regularization.
+
+    Returns
+    -------
+    None
+        Displays or saves the dispersion spectrum.
+    """
+    ccf, uniq_dist, dt = prepare_ccf_data(st, part)
+
+    freq_min = freq_min if freq_min is not None else 0
+    freq_max = freq_max if freq_max is not None else st[0].stats.sampling_rate // 2
+    p = np.linspace(1 / vel_max, 1 / vel_min, num_vel)
+
+    return _radon(ccf, p, dt, uniq_dist, freq_min, freq_max,
+           num_vel=num_vel, max_iter=maxiter, tol=tol,
+           method=method, reg_lambda=reg_lambda, norm=norm)
+
+
+if __name__ == "__main__":
+    dirpath = Path("/media/wdp/disk4/git/noiseba1/examples/CCF")
+
+    radon_from_dir(dirpath, freq_min=0.1, freq_max=45, vel_min=50, vel_max=500,
+                    num_vel=101, part="left", method='CG', reg_lambda=10, maxiter=300, tol=1)

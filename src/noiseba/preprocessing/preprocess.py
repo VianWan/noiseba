@@ -3,7 +3,7 @@ import logging
 
 from obspy import read, Trace, Stream
 from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import as_completed, ThreadPoolExecutor
 from typing import Optional
 from tqdm import tqdm
 
@@ -67,9 +67,9 @@ def process_single_trace(
         if target_rate is not None:
             tr = smart_decimate(tr, target_rate)
 
-        station_name = f"45{tr.stats.station}"
+        station_name = f"{tr.stats.station}"
         channel = tr.stats.channel[-1]
-        output_path = output_dir / f"{station_name}.{channel}.sac"
+        output_path = output_dir / f"45{station_name}.{channel}.sac"
 
         if output_path.exists():
             output_path.unlink()
@@ -114,7 +114,7 @@ def batch_process(
     avg_rate = np.mean(rates)
     skipped_st = []
     for idx in np.where(abs(rates - avg_rate) > 0.01)[0][::-1]:
-        skipped_st.append("45" + stream[idx].stats.station)
+        skipped_st.append(stream[idx].stats.station)
         del stream[idx]
         logging.warning(
             f"Removing {stream[idx].stats.station} trace with sampling_rate deviate >0.01 Hz"
@@ -133,7 +133,7 @@ def batch_process(
     print("\n")
 
     results = []
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
             executor.submit(
                 process_single_trace, tr, output_dir, target_rate, freq_min, freq_max
@@ -154,22 +154,22 @@ if __name__ == "__main__":
     import datetime
 
     st = read(
-        r"/media/wdp/disk4/site1_line1/gate1/453000036.0001.N.sac"
+        r"/media/wdp/disk4/site1_line1/shuiwu/453000030.Z.sac"
     )  # choice one tos access meta
 
-    start_time = st[0].stats.starttime + datetime.timedelta(minutes=5)
+    start_time = st[0].stats.starttime + datetime.timedelta(minutes=1)
     # end_time = start_time + datetime.timedelta(minutes=5)
     end_time = st[0].stats.endtime
 
     config = {
-        "input_dir": Path("/media/wdp/disk4/site1_line1/gate1"),
-        "output_dir": Path("/media/wdp/disk4/site1_line1/gate1/pre_gate_data"),
+        "input_dir": Path("/media/wdp/disk4/site1_line1/shuiwu"),
+        "output_dir": Path("./pre_data"),
         "target_rate": 100,  # decimate rate
         "freq_min": 0.1,  # lower filter
         "freq_max": 45,  # upper filter
         "start_time": start_time,  # cut begin
         "end_time": end_time,  # cut end
-        "max_workers": 36,  # used cpu cores
+        "max_workers": 10,  # used cpu cores
     }
 
     batch_process(**config)
