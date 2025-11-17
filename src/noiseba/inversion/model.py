@@ -155,13 +155,15 @@ class Model:
 
 class Curve:
     """
-    Store dispersion curve, mode and wave type.
+    Store dispersion curve, mode, wave type, and location information.
     """
 
-    def __init__(self, freq, velocity, wave_type, mode=0):
+    def __init__(self, freq, velocity, wave_type, mode=0, x=None, y=None):
         self.freq = freq
         self.period = np.flipud(1 / self.freq)
         self.velocity = velocity
         self._pvelocity = np.flipud(velocity)
         self.mode = mode
         self.wave_type = wave_type
+        self.x = x  # x coordinate of the representative location
+        self.y = y  # y coordinate of the representative location

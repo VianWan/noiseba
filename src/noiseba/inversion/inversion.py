@@ -193,7 +193,14 @@ class Inversion:
         for item in curves:
             period, vel = forward_disp(model_matrix, item.period, mode=item.mode, wave_type=item.wave_type)
             curves_dict[f"{item.wave_type[0]}mode{item.mode}"].append(
-                Curve(np.flipud(1 / period), np.flipud(vel), item.wave_type, item.mode)
+                Curve(
+                    freq=np.flipud(1 / period), 
+                    velocity=np.flipud(vel), 
+                    wave_type=item.wave_type, 
+                    mode=item.mode,
+                    x=getattr(item, 'x', None),  # Preserve x coordinate if available
+                    y=getattr(item, 'y', None)   # Preserve y coordinate if available
+                )
             )
 
         return dict(curves_dict)
@@ -256,7 +263,14 @@ class Inversion:
             for item in obs_curves:
                 period, vel = forward_disp(model_matrix, item.period, mode=item.mode, wave_type=item.wave_type)
                 curves_dict[f"{item.wave_type[0]}mode{item.mode}"].append(
-                    Curve(np.flipud(1 / period), np.flipud(vel), item.wave_type, item.mode)
+                    Curve(
+                        freq=np.flipud(1 / period), 
+                        velocity=np.flipud(vel), 
+                        wave_type=item.wave_type, 
+                        mode=item.mode,
+                        x=getattr(item, 'x', None),  # Preserve x coordinate if available
+                        y=getattr(item, 'y', None)   # Preserve y coordinate if available
+                    )
                 )
 
         return dict(curves_dict)
