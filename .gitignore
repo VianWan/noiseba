@@ -12,4 +12,4 @@ examples/**/
 !examples/*.png
 !examples/*.ipynb
 !examples/*.py
-!examples/*.csv
+# !examples/*.csv
