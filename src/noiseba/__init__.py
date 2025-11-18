@@ -1,5 +1,5 @@
 """
-A package for seismic ambient noise data processing.
+A python based package for high-frequency seismic ambient noise surface wave imaging.
 """
 
 __author__       = "wdp"
@@ -33,6 +33,10 @@ from .preprocessing import (
     batch_process,
 )
 from .dispersion import fj_from_dir, park_from_dir, radon_from_dir
+from .inversion import (
+    create_2d_profile_plot,
+    trans_2d_profile,
+)
 
 __all__ = [
     "__version__",
@@ -64,5 +68,9 @@ __all__ = [
     "fj_from_dir",
     "park_from_dir",
     "radon_from_dir",
+    # Inversion functions
+    "interpolate_1d_to_2d_profile",
+    "create_2d_profile_plot",
+    "extract_1d_profiles_at_locations",
 ]
 

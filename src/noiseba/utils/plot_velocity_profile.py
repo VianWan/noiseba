@@ -91,7 +91,7 @@ def plot_velocity_profile(velocities, thickness, axes=None, unit="km", stride: i
         ax.set_ylabel(f"Depth ({unit})", fontsize=28)
         ax.set_title("Velocity Profiles", fontsize=28)
         ax.set_ylim(depth_intervals[-1], depth_intervals[0])
-        ax.tick_params(axis="both", labelsize=28)
+        ax.tick_params(axis="both", direction='in', labelsize=28)
 
         # Set margins
         margin = 0.1
